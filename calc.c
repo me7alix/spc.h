@@ -5,6 +5,8 @@
 #define SPC_IMPLEMENTATION
 #include "spc.h"
 
+/* AST */
+
 typedef struct AST {
 	enum {
 		AST_NUMBER,
@@ -32,6 +34,7 @@ AST *number(double num) {
 	AST *n = malloc(sizeof(*n));
 	n->kind = AST_NUMBER;
 	n->as.number = num;
+	return n;
 }
 
 AST *bin_expr(int op) {
@@ -40,6 +43,7 @@ AST *bin_expr(int op) {
 	n->as.bin_expr.op = op;
 	n->as.bin_expr.lhs = NULL;
 	n->as.bin_expr.rhs = NULL;
+	return n;
 }
 
 void ast_dump(AST *n) {
@@ -69,7 +73,7 @@ double ast_calc(AST *n) {
 	case AST_NUMBER:
 		return n->as.number;
 
-	case AST_BIN_EXPR:
+	case AST_BIN_EXPR:;
 		double lhs = ast_calc(n->as.bin_expr.lhs);
 		double rhs = ast_calc(n->as.bin_expr.rhs);
 
@@ -82,21 +86,15 @@ double ast_calc(AST *n) {
 	}
 }
 
+/* Scanner */
+
 typedef struct {
 	char *stream;
 } Scanner;
 
-static char scn_peek(Scanner *l) {
-	return *(l->stream);
-}
-
-static char scn_next(Scanner *l) {
-	return *(l->stream++);
-}
-
-static void scn_skip_ws(Scanner *l) {
-	while (scn_peek(l) == ' ') scn_next(l);
-}
+#define peek(l) (*((l)->stream))
+#define next(l) (*((l)->stream++))
+#define skip_ws(l) while (peek(l) == ' ') next(l)
 
 typedef struct {
 	Scanner stack[64];
@@ -125,28 +123,30 @@ void scn_mng_unmark(void *self) {
 	mng->depth--;
 }
 
-SPC_Result parse_number_f(SPC_Parser *p, SPC_Input *inp) {
-	Scanner *l = inp->get(inp->self);
-	scn_skip_ws(l);
+/* Parsers */
 
-	if (isdigit(scn_peek(l)) || scn_peek(l) == '-') {
+SPC_Result pnum_f(SPC_Parser *p, SPC_Input *inp) {
+	Scanner *l = inp->get(inp->self);
+	skip_ws(l);
+
+	if (isdigit(peek(l)) || peek(l) == '-') {
 		char digits[32] = {0};
 		size_t count = 0;
 		bool met_dot = false;
 		int z = 1;
 
-		if (scn_peek(l) == '-') {
+		if (peek(l) == '-') {
 			z = -1;
-			scn_next(l);
+			next(l);
 		}
 
-		while (isdigit(scn_peek(l)) || scn_peek(l) == '.') {
-			if (scn_peek(l) == '.') {
+		while (isdigit(peek(l)) || peek(l) == '.') {
+			if (peek(l) == '.') {
 				if (met_dot) return spc_error("incorrect number", NULL);
 				met_dot = true;
 			}
 
-			digits[count++] = scn_next(l);
+			digits[count++] = next(l);
 		}
 
 		double num = z * atof(digits);
@@ -156,79 +156,45 @@ SPC_Result parse_number_f(SPC_Parser *p, SPC_Input *inp) {
 	return spc_error("incorrect number", NULL);
 }
 
-SPC_Parser *parse_number() {
+SPC_Parser *pnum() {
 	SPC_Parser *p = malloc(sizeof(*p));
-	p->parse = parse_number_f;
+	p->parse = pnum_f;
 	return p;
 }
 
-typedef struct {
-	int kind;
-} ParseOperCtx;
-
-SPC_Result parse_operator_f(SPC_Parser *p, SPC_Input *inp) {
-	ParseOperCtx *ctx = p->ctx;
-	Scanner *l = inp->get(inp->self);
-	scn_skip_ws(l);
-
-	switch (scn_peek(l)) {
-	case '+':
-		if (ctx->kind == AST_OP_ADD) {
-			scn_next(l);
-			return spc_success(bin_expr(AST_OP_ADD), free);
-		} break;
-	case '-':
-		if (ctx->kind == AST_OP_SUB) {
-			scn_next(l);
-			return spc_success(bin_expr(AST_OP_SUB), free);
-		} break;
-	case '*':
-		if (ctx->kind == AST_OP_MUL) {
-			scn_next(l);
-			return spc_success(bin_expr(AST_OP_MUL), free);
-		} break;
-	case '/':
-		if (ctx->kind == AST_OP_DIV) {
-			scn_next(l);
-			return spc_success(bin_expr(AST_OP_DIV), free);
-		}
+void *map_bin_op(void *data) {
+	switch ((char)data) {
+		case '+': return bin_expr(AST_OP_ADD);
+		case '-': return bin_expr(AST_OP_SUB);
+		case '*': return bin_expr(AST_OP_MUL);
+		case '/': return bin_expr(AST_OP_DIV);
 	}
-
-	return spc_error("incorrect operator", NULL);
-}
-
-SPC_Parser *parse_operator(int kind) {
-	SPC_Parser *p = malloc(sizeof(*p));
-	ParseOperCtx *ctx = malloc(sizeof(*ctx));
-	ctx->kind = kind;
-	p->parse = parse_operator_f;
-	p->ctx = ctx;
-	return p;
 }
 
 typedef struct {
 	char character;
 } ParseCharCtx;
 
-SPC_Result parse_char_f(SPC_Parser *p, SPC_Input *inp) {
+SPC_Result pch_f(SPC_Parser *p, SPC_Input *inp) {
 	ParseCharCtx *ctx = p->ctx;
 	Scanner *l = inp->get(inp->self);
-	scn_skip_ws(l);
 
-	if (ctx->character == scn_peek(l)) {
-		scn_next(l);
-		return spc_success(NULL, NULL);
+	skip_ws(l);
+
+	if (ctx->character == peek(l)) {
+		next(l);
+		return spc_success((void*)ctx->character, NULL);
 	}
 
 	return spc_error("wrong character", NULL);
 }
 
 
-SPC_Parser *parse_char(char ch) {
+SPC_Parser *pch(char ch) {
 	SPC_Parser *p = malloc(sizeof(*p));
 	ParseCharCtx *ctx = malloc(sizeof(*ctx));
 	ctx->character = ch;
-	p->parse = parse_char_f;
+	p->parse = pch_f;
 	p->ctx = ctx;
 	return p;
 }
@@ -241,7 +207,7 @@ void *bin_expr_comb(void *lhs, void *e, void *rhs) {
 
 int main(int argc, char *argv[]) {
 	if (argc != 2) {
-		fprintf(stderr, "provide the expression");
+		fprintf(stderr, "provide an expression\n");
 		return 1;
 	}
 
@@ -256,30 +222,34 @@ int main(int argc, char *argv[]) {
 		scn_mng_rewind,
 	};
 
-	SPC_Combine3 op = {
+	SPC_Combine3 cbo = {
 		bin_expr_comb,
 		free,
+	};
+
+	SPC_Map mbo = {
+		map_bin_op,
+		free
 	};
 
 	SPC_Parser *expr = NULL;
 	SPC_Parser *lazy_expr = spc_lazy(&expr);
 
-	SPC_Parser *add = parse_operator(AST_OP_ADD);
-	SPC_Parser *sub = parse_operator(AST_OP_SUB);
-	SPC_Parser *mul = parse_operator(AST_OP_MUL);
-	SPC_Parser *div = parse_operator(AST_OP_DIV);
-	SPC_Parser *num = parse_number();
+	SPC_Parser *add = spc_map(pch('+'), mbo);
+	SPC_Parser *sub = spc_map(pch('-'), mbo);
+	SPC_Parser *mul = spc_map(pch('*'), mbo);
+	SPC_Parser *div = spc_map(pch('/'), mbo);
 
-	SPC_Parser *par     = spc_between(parse_char('('), lazy_expr, parse_char(')'));
-	SPC_Parser *value   = spc_choice(num, par);
-	SPC_Parser *product = spc_chain_left(value,   spc_choice(mul, div), op);
-	            expr    = spc_chain_left(product, spc_choice(add, sub), op);
+	SPC_Parser *par     = spc_between(pch('('), lazy_expr, pch(')'));
+	SPC_Parser *value   = spc_choice(pnum(), par);
+	SPC_Parser *product = spc_chain_left(value,   spc_choice(mul, div), cbo);
+	            expr    = spc_chain_left(product, spc_choice(add, sub), cbo);
 
 	SPC_Result res = expr->parse(expr, &inp);
 
 	Scanner *scn = scn_mng_get(&scn_mng);
-	if (scn_peek(scn) != '\0') {
-		res = spc_error("incorrect expression", NULL);
+	if (peek(scn) != '\0') {
+		res = spc_error("invalid expression", NULL);
 	}
 
 	if (res.success) {
