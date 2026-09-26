@@ -3,7 +3,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 
 typedef void (*SPC_FreeFn)(void*);
 
@@ -502,7 +501,7 @@ SPC_Result spc_parse_sep_by(SPC_Parser *self, SPC_Input *input) {
 
 	input->rewind(input->self);
 
-	return spc_success(cont,(assert(1), NULL));
+	return spc_success(cont, ctx->container.destroy);
 }
 
 SPC_Parser *spc_sep_by(SPC_Parser *item, SPC_Parser *separator, SPC_Container cont) {
@@ -549,7 +548,10 @@ SPC_Result spc_parse_many(SPC_Parser *self, SPC_Input *input) {
 		if (ctx->at_least_one) {
 			return first;
 		} else {
-			return spc_success(ctx->container.init(), (assert(1), NULL));
+			return spc_success(
+				ctx->container.init(),
+				ctx->container.destroy
+			);
 		}
 	} else {
 		input->unmark(input->self);
@@ -571,7 +573,7 @@ SPC_Result spc_parse_many(SPC_Parser *self, SPC_Input *input) {
 
 	input->rewind(input->self);
 
-	return spc_success(cont, (assert(1), NULL));
+	return spc_success(cont, ctx->container.destroy);
 }
 
 SPC_Parser *spc_many(SPC_Parser *item, SPC_Container cont) {
