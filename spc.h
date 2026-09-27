@@ -22,7 +22,7 @@ typedef struct {
 } SPC_Input;
 
 typedef struct SPC_Parser SPC_Parser;
-typedef SPC_Result (*ParseFn)(SPC_Parser*, SPC_Input*);
+typedef SPC_Result (*SPC_ParseFn)(SPC_Parser*, SPC_Input*);
 typedef void *(*SPC_Combine2Fn)(void*, void*);
 typedef void *(*SPC_Combine3Fn)(void*, void*, void*);
 typedef void *(*SPC_MapFn)(void*);
@@ -49,7 +49,7 @@ typedef struct {
 } SPC_Container;
 
 struct SPC_Parser {
-    ParseFn parse;
+    SPC_ParseFn parse;
     void *ctx;
 };
 
