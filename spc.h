@@ -16,7 +16,6 @@ typedef struct {
 
 typedef struct {
 	void *self;
-	void *(*get)(void*);
 	void (*mark)(void*);
 	void (*unmark)(void*);
 	void (*rewind)(void*);

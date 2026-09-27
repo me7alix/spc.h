@@ -126,7 +126,7 @@ void scn_mng_unmark(void *self) {
 /* Parsers */
 
 SPC_Result pnum_f(SPC_Parser *p, SPC_Input *inp) {
-	Scanner *l = inp->get(inp->self);
+	Scanner *l = scn_mng_get(inp->self);
 	skip_ws(l);
 
 	if (isdigit(peek(l)) || peek(l) == '-') {
@@ -177,7 +177,7 @@ typedef struct {
 
 SPC_Result pch_f(SPC_Parser *p, SPC_Input *inp) {
 	ParseCharCtx *ctx = p->ctx;
-	Scanner *l = inp->get(inp->self);
+	Scanner *l = scn_mng_get(inp->self);
 
 	skip_ws(l);
 
@@ -216,7 +216,6 @@ int main(int argc, char *argv[]) {
 
 	SPC_Input inp = {
 		&scn_mng,
-		scn_mng_get,
 		scn_mng_mark,
 		scn_mng_unmark,
 		scn_mng_rewind,
