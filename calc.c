@@ -101,23 +101,23 @@ typedef struct {
 	int depth;
 } ScannerManager;
 
-void *scn_mng_get(void *self) {
+void *sm_get(void *self) {
 	ScannerManager *mng = self;
 	return &mng->stack[mng->depth];
 }
 
-void scn_mng_mark(void *self) {
+void sm_mark(void *self) {
 	ScannerManager *mng = self;
 	mng->stack[mng->depth + 1] = mng->stack[mng->depth];
 	mng->depth++;
 }
 
-void scn_mng_rewind(void *self) {
+void sm_rewind(void *self) {
 	ScannerManager *mng = self;
 	mng->depth--;
 }
 
-void scn_mng_unmark(void *self) {
+void sm_unmark(void *self) {
 	ScannerManager *mng = self;
 	mng->stack[mng->depth - 1] = mng->stack[mng->depth];
 	mng->depth--;
@@ -126,7 +126,7 @@ void scn_mng_unmark(void *self) {
 /* Parsers */
 
 SPC_Result pnum_f(SPC_Parser *p, SPC_Input *inp) {
-	Scanner *l = scn_mng_get(inp->self);
+	Scanner *l = sm_get(inp->self);
 	skip_ws(l);
 
 	if (isdigit(peek(l)) || peek(l) == '-') {
@@ -142,17 +142,21 @@ SPC_Result pnum_f(SPC_Parser *p, SPC_Input *inp) {
 
 		while (isdigit(peek(l)) || peek(l) == '.') {
 			if (peek(l) == '.') {
-				if (met_dot) return spc_error("incorrect number", NULL);
+				if (met_dot) goto error;
 				met_dot = true;
 			}
 
 			digits[count++] = next(l);
 		}
 
+		if (count == 0 || count == 1 && digits[0] == '.')
+			goto error;
+
 		double num = z * atof(digits);
 		return spc_success(number(num), free);
 	}
 
+error:
 	return spc_error("incorrect number", NULL);
 }
 
@@ -177,7 +181,7 @@ typedef struct {
 
 SPC_Result pch_f(SPC_Parser *p, SPC_Input *inp) {
 	ParseCharCtx *ctx = p->ctx;
-	Scanner *l = scn_mng_get(inp->self);
+	Scanner *l = sm_get(inp->self);
 
 	skip_ws(l);
 
@@ -211,25 +215,12 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	ScannerManager scn_mng = {0};
-	scn_mng.stack[0] = (Scanner){argv[1]};
+	ScannerManager sm = {0};
+	sm.stack[0] = (Scanner){argv[1]};
 
-	SPC_Input inp = {
-		&scn_mng,
-		scn_mng_mark,
-		scn_mng_unmark,
-		scn_mng_rewind,
-	};
-
-	SPC_Combine3 cbo = {
-		bin_expr_comb,
-		free,
-	};
-
-	SPC_Map mbo = {
-		map_bin_op,
-		free
-	};
+	SPC_Input inp = {&sm, sm_mark, sm_unmark, sm_rewind};
+	SPC_Combine3 cbo = {bin_expr_comb, free};
+	SPC_Map mbo = {map_bin_op, free};
 
 	SPC_Parser *expr = NULL;
 	SPC_Parser *lazy_expr = spc_lazy(&expr);
@@ -246,7 +237,7 @@ int main(int argc, char *argv[]) {
 
 	SPC_Result res = expr->parse(expr, &inp);
 
-	Scanner *scn = scn_mng_get(&scn_mng);
+	Scanner *scn = sm_get(&sm);
 	if (peek(scn) != '\0') {
 		res = spc_error("invalid expression", NULL);
 	}
