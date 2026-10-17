@@ -2,7 +2,7 @@
 #define SPC_H_
 
 #include <stdlib.h>
-#include <string.h>
+#include <stdarg.h>
 
 typedef void (*SPC_FreeFn)(void*);
 
@@ -23,19 +23,19 @@ typedef struct {
 
 typedef struct SPC_Parser SPC_Parser;
 typedef SPC_Result (*SPC_ParseFn)(SPC_Parser*, SPC_Input*);
-typedef void *(*SPC_Combine2Fn)(void*, void*);
-typedef void *(*SPC_Combine3Fn)(void*, void*, void*);
+typedef void *(*SPC_FoldFn)(int n, void**);
+typedef void *(*SPC_Fold3Fn)(void*, void*, void*);
 typedef void *(*SPC_MapFn)(void*);
 
 typedef struct {
-	SPC_Combine3Fn combine;
+	SPC_FoldFn fold;
 	SPC_FreeFn destroy;
-} SPC_Combine3;
+} SPC_Fold;
 
 typedef struct {
-	SPC_Combine2Fn combine;
+	SPC_Fold3Fn fold;
 	SPC_FreeFn destroy;
-} SPC_Combine2;
+} SPC_Fold3;
 
 typedef struct {
 	SPC_MapFn transform;
@@ -54,14 +54,14 @@ struct SPC_Parser {
 };
 
 SPC_Parser *spc_map(SPC_Parser *parser, SPC_Map transform);
-SPC_Parser *spc_choice(SPC_Parser *left, SPC_Parser *right);
-SPC_Parser *spc_sequence(SPC_Parser *left, SPC_Parser *right, SPC_Combine2 combine);
+SPC_Parser *spc_choice(int n, ...);
+SPC_Parser *spc_sequence(int n, SPC_Fold fold, ...);
 SPC_Parser *spc_keep_right(SPC_Parser *left, SPC_Parser *right);
 SPC_Parser *spc_keep_left(SPC_Parser *left, SPC_Parser *right);
 SPC_Parser *spc_between(SPC_Parser *left, SPC_Parser *middle, SPC_Parser *right);
 SPC_Parser *spc_lazy(SPC_Parser **ref);
-SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Combine3 combine);
-SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Combine3 combine);
+SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold);
+SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold);
 SPC_Parser *spc_sep_by(SPC_Parser *item, SPC_Parser *separator, SPC_Container cont);
 SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Container cont);
 SPC_Parser *spc_many(SPC_Parser *item, SPC_Container cont);
@@ -115,43 +115,43 @@ SPC_Parser *spc_map(SPC_Parser *parser, SPC_Map transform) {
 }
 
 typedef struct {
-    SPC_Parser *left;
-    SPC_Parser *right;
+	SPC_Parser **items;
+	int count;
 } SPC_ChoiceCtx;
 
 SPC_Result spc_parse_choice(SPC_Parser *self, SPC_Input *input) {
     SPC_ChoiceCtx *ctx = self->ctx;
+	SPC_Result res;
 
-	input->mark(input->self);
+	for (int i = 0; i < ctx->count; i++) {
+		input->mark(input->self);
 
-    SPC_Result left = ctx->left->parse(ctx->left, input);
-    if (left.success) {
-		input->unmark(input->self);
-        return left;
-    }
+		res = ctx->items[i]->parse(ctx->items[i], input);
+		if (res.success) {
+			input->unmark(input->self);
+			return res;
+		}
 
-	input->rewind(input->self);
-	input->mark(input->self);
+		input->rewind(input->self);
 
-	if (left.free_error) {
-		left.free_error(left.error);
+		if (res.free_error) {
+			res.free_error(res.error);
+		}
 	}
 
-    SPC_Result right = ctx->right->parse(ctx->right, input);
-	if (right.success) {
-		input->unmark(input->self);
-		return right;
-	}
-
-	input->rewind(input->self);
-
-	return right;
+	return res;
 }
 
-SPC_Parser *spc_choice(SPC_Parser *left, SPC_Parser *right) {
+SPC_Parser *spc_choice(int n, ...) {
     SPC_ChoiceCtx *ctx = malloc(sizeof(*ctx));
-    ctx->left = left;
-    ctx->right = right;
+	ctx->items = malloc(sizeof(void*) * n);
+	ctx->count = n;
+
+	va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++)
+        ctx->items[i] = va_arg(ap, SPC_Parser*);
+    va_end(ap);
 
     SPC_Parser *p = malloc(sizeof(*p));
     p->parse = spc_parse_choice;
@@ -160,41 +160,52 @@ SPC_Parser *spc_choice(SPC_Parser *left, SPC_Parser *right) {
 }
 
 typedef struct {
-    SPC_Parser *left;
-    SPC_Parser *right;
-	SPC_Combine2 combine;
+    SPC_Parser **items;
+	int count;
+	SPC_Fold fold;
 } SPC_SequenceCtx;
 
 SPC_Result spc_parse_sequence(SPC_Parser *self, SPC_Input *input) {
     SPC_SequenceCtx *ctx = self->ctx;
+	void *items[ctx->count];
+	SPC_FreeFn ffs[ctx->count];
 
 	input->mark(input->self);
 
-    SPC_Result left = ctx->left->parse(ctx->left, input);
-    if (!left.success) {
-		input->rewind(input->self);
-		return left;
-	}
+	for (int i = 0; i < ctx->count; i++) {
+		SPC_Result res = ctx->items[i]->parse(ctx->items[i], input);
+		if (!res.success) {
+			for (int j = 0; j < i; j++) {
+				ffs[j](items[j]);
+			}
 
-	SPC_Result right = ctx->right->parse(ctx->right, input);
-    if (!right.success) {
-		input->rewind(input->self);
-		return right;
+			input->rewind(input->self);
+			return res;
+		}
+
+		items[i] = res.data;
+		ffs[i] = res.free_data;
 	}
 
 	input->unmark(input->self);
 
     return spc_success(
-		ctx->combine.combine(left.data, right.data),
-		ctx->combine.destroy
+		ctx->fold.fold(ctx->count, items),
+		ctx->fold.destroy
 	);
 }
 
-SPC_Parser *spc_sequence(SPC_Parser *left, SPC_Parser *right, SPC_Combine2 combine) {
+SPC_Parser *spc_sequence(int n, SPC_Fold fold, ...) {
     SPC_SequenceCtx *ctx = malloc(sizeof(*ctx));
-    ctx->left = left;
-    ctx->right = right;
-	ctx->combine = combine;
+	ctx->fold = fold;
+	ctx->items = malloc(sizeof(void*) * n);
+	ctx->count = n;
+
+	va_list ap;
+    va_start(ap, fold);
+    for (int i = 0; i < n; i++)
+        ctx->items[i] = va_arg(ap, SPC_Parser*);
+    va_end(ap);
 
     SPC_Parser *p = malloc(sizeof(*p));
     p->parse = spc_parse_sequence;
@@ -347,7 +358,7 @@ SPC_Parser *spc_lazy(SPC_Parser **ref) {
 typedef struct {
 	SPC_Parser *operand;
 	SPC_Parser *operator;
-	SPC_Combine3 combine;
+	SPC_Fold3 fold;
 } SPC_ChainLeftCtx;
 
 SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
@@ -378,8 +389,8 @@ SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
 			return right;
 		}
 
-		left.data = ctx->combine.combine(left.data, middle.data, right.data);
-		left.free_data = ctx->combine.destroy;
+		left.data = ctx->fold.fold(left.data, middle.data, right.data);
+		left.free_data = ctx->fold.destroy;
 
 		input->unmark(input->self);
 	}
@@ -387,11 +398,11 @@ SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
 	return left;
 }
 
-SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Combine3 combine) {
+SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold) {
 	SPC_ChainLeftCtx *ctx = malloc(sizeof(*ctx));
 	ctx->operand = operand;
 	ctx->operator = operator;
-	ctx->combine = combine;
+	ctx->fold = fold;
 
 	SPC_Parser *p = malloc(sizeof(*p));
 	p->parse = spc_parse_chain_left;
@@ -402,7 +413,7 @@ SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Combin
 typedef struct {
 	SPC_Parser *operand;
 	SPC_Parser *operator;
-	SPC_Combine3 combine;
+	SPC_Fold3 fold;
 } SPC_ChainRightCtx;
 
 SPC_Result spc_parse_chain_right(SPC_Parser *self, SPC_Input *input) {
@@ -436,16 +447,16 @@ SPC_Result spc_parse_chain_right(SPC_Parser *self, SPC_Input *input) {
 	input->unmark(input->self);
 
 	return spc_success(
-		ctx->combine.combine(left.data, middle.data, right.data),
-		ctx->combine.destroy
+		ctx->fold.fold(left.data, middle.data, right.data),
+		ctx->fold.destroy
 	);
 }
 
-SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Combine3 combine) {
+SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold) {
 	SPC_ChainRightCtx *ctx = malloc(sizeof(*ctx));
 	ctx->operand = operand;
 	ctx->operator = operator;
-	ctx->combine = combine;
+	ctx->fold = fold;
 
 	SPC_Parser *p = malloc(sizeof(*p));
 	p->parse = spc_parse_chain_right;
