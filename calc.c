@@ -88,37 +88,28 @@ double ast_calc(AST *n) {
 
 /* Scanner */
 
-typedef struct {
-	char *stream;
-} Scanner;
-
-#define peek(l) (*((l)->stream))
-#define next(l) (*((l)->stream++))
+#define peek(l) (*((l)->stack[(l)->depth]))
+#define next(l) (*((l)->stack[(l)->depth]++))
 #define skip_ws(l) while (peek(l) == ' ') next(l)
 
 typedef struct {
-	Scanner stack[64];
+	char *stack[64];
 	int depth;
-} ScannerManager;
+} Scanner;
 
-void *sm_get(void *self) {
-	ScannerManager *mng = self;
-	return &mng->stack[mng->depth];
-}
-
-void sm_mark(void *self) {
-	ScannerManager *mng = self;
+void sc_mark(void *self) {
+	Scanner *mng = self;
 	mng->stack[mng->depth + 1] = mng->stack[mng->depth];
 	mng->depth++;
 }
 
-void sm_rewind(void *self) {
-	ScannerManager *mng = self;
+void sc_rewind(void *self) {
+	Scanner *mng = self;
 	mng->depth--;
 }
 
-void sm_unmark(void *self) {
-	ScannerManager *mng = self;
+void sc_unmark(void *self) {
+	Scanner *mng = self;
 	mng->stack[mng->depth - 1] = mng->stack[mng->depth];
 	mng->depth--;
 }
@@ -126,7 +117,7 @@ void sm_unmark(void *self) {
 /* Parsers */
 
 SPC_Result pnum_f(SPC_Parser *p, SPC_Input *inp) {
-	Scanner *l = sm_get(inp->self);
+	Scanner *l = inp->self;
 	skip_ws(l);
 
 	if (isdigit(peek(l)) || peek(l) == '-') {
@@ -181,7 +172,7 @@ typedef struct {
 
 SPC_Result pch_f(SPC_Parser *p, SPC_Input *inp) {
 	ParseCharCtx *ctx = p->ctx;
-	Scanner *l = sm_get(inp->self);
+	Scanner *l = inp->self;
 
 	skip_ws(l);
 
@@ -215,11 +206,11 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	ScannerManager sm = {0};
-	sm.stack[0] = (Scanner){argv[1]};
+	Scanner sm = {0};
+	sm.stack[0] = argv[1];
 
-	SPC_Input inp = {&sm, sm_mark, sm_unmark, sm_rewind};
-	SPC_Combine3 cbo = {bin_expr_comb, free};
+	SPC_Input inp = {&sm, sc_mark, sc_unmark, sc_rewind};
+	SPC_Fold3 cbe = {bin_expr_comb, free};
 	SPC_Map mbo = {map_bin_op, free};
 
 	SPC_Parser *expr = NULL;
@@ -231,14 +222,13 @@ int main(int argc, char *argv[]) {
 	SPC_Parser *div = spc_map(pch('/'), mbo);
 
 	SPC_Parser *par     = spc_between(pch('('), lazy_expr, pch(')'));
-	SPC_Parser *value   = spc_choice(pnum(), par);
-	SPC_Parser *product = spc_chain_left(value,   spc_choice(mul, div), cbo);
-	            expr    = spc_chain_left(product, spc_choice(add, sub), cbo);
+	SPC_Parser *value   = spc_choice(2, pnum(), par);
+	SPC_Parser *product = spc_chain_left(value,   spc_choice(2, mul, div), cbe);
+	            expr    = spc_chain_left(product, spc_choice(2, add, sub), cbe);
 
 	SPC_Result res = expr->parse(expr, &inp);
 
-	Scanner *scn = sm_get(&sm);
-	if (peek(scn) != '\0') {
+	if (peek(&sm) != '\0') {
 		res = spc_error("invalid expression", NULL);
 	}
 
