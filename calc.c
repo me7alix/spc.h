@@ -116,7 +116,7 @@ void sc_unmark(void *self) {
 
 /* Parsers */
 
-SPC_Result pnum_f(SPC_Parser *p, SPC_Input *inp) {
+SPC_Result pnumf(SPC_Parser *p, SPC_Input *inp) {
 	Scanner *l = inp->self;
 	skip_ws(l);
 
@@ -153,7 +153,7 @@ error:
 
 SPC_Parser *pnum() {
 	SPC_Parser *p = malloc(sizeof(*p));
-	p->parse = pnum_f;
+	p->parse = pnumf;
 	return p;
 }
 
@@ -170,7 +170,7 @@ typedef struct {
 	char character;
 } ParseCharCtx;
 
-SPC_Result pch_f(SPC_Parser *p, SPC_Input *inp) {
+SPC_Result pchf(SPC_Parser *p, SPC_Input *inp) {
 	ParseCharCtx *ctx = p->ctx;
 	Scanner *l = inp->self;
 
@@ -189,15 +189,15 @@ SPC_Parser *pch(char ch) {
 	SPC_Parser *p = malloc(sizeof(*p));
 	ParseCharCtx *ctx = malloc(sizeof(*ctx));
 	ctx->character = ch;
-	p->parse = pch_f;
+	p->parse = pchf;
 	p->ctx = ctx;
 	return p;
 }
 
-void *bin_expr_comb(void *lhs, void *e, void *rhs) {
-	((AST*)e)->as.bin_expr.lhs = lhs;
-	((AST*)e)->as.bin_expr.rhs = rhs;
-	return e;
+void *bin_expr_fold(int n, void **args) {
+	((AST*)args[1])->as.bin_expr.lhs = args[0];
+	((AST*)args[1])->as.bin_expr.rhs = args[2];
+	return args[1];
 }
 
 int main(int argc, char *argv[]) {
@@ -210,7 +210,7 @@ int main(int argc, char *argv[]) {
 	sm.stack[0] = argv[1];
 
 	SPC_Input inp = {&sm, sc_mark, sc_unmark, sc_rewind};
-	SPC_Fold3 cbe = {bin_expr_comb, free};
+	SPC_Fold cbe = {bin_expr_fold, free};
 	SPC_Map mbo = {map_bin_op, free};
 
 	SPC_Parser *expr = NULL;

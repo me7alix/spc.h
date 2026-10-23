@@ -24,7 +24,6 @@ typedef struct {
 typedef struct SPC_Parser SPC_Parser;
 typedef SPC_Result (*SPC_ParseFn)(SPC_Parser*, SPC_Input*);
 typedef void *(*SPC_FoldFn)(int n, void**);
-typedef void *(*SPC_Fold3Fn)(void*, void*, void*);
 typedef void *(*SPC_MapFn)(void*);
 
 typedef struct {
@@ -33,20 +32,9 @@ typedef struct {
 } SPC_Fold;
 
 typedef struct {
-	SPC_Fold3Fn fold;
-	SPC_FreeFn destroy;
-} SPC_Fold3;
-
-typedef struct {
 	SPC_MapFn transform;
 	SPC_FreeFn destroy;
 } SPC_Map;
-
-typedef struct {
-	void *(*init)(void);
-	void (*append)(void *self, void *item);
-	SPC_FreeFn destroy;
-} SPC_Container;
 
 struct SPC_Parser {
     SPC_ParseFn parse;
@@ -60,12 +48,12 @@ SPC_Parser *spc_keep_right(SPC_Parser *left, SPC_Parser *right);
 SPC_Parser *spc_keep_left(SPC_Parser *left, SPC_Parser *right);
 SPC_Parser *spc_between(SPC_Parser *left, SPC_Parser *middle, SPC_Parser *right);
 SPC_Parser *spc_lazy(SPC_Parser **ref);
-SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold);
-SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold);
-SPC_Parser *spc_sep_by(SPC_Parser *item, SPC_Parser *separator, SPC_Container cont);
-SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Container cont);
-SPC_Parser *spc_many(SPC_Parser *item, SPC_Container cont);
-SPC_Parser *spc_many1(SPC_Parser *item, SPC_Container cont);
+SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold fold);
+SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold fold);
+SPC_Parser *spc_sep_by(SPC_Parser *item, SPC_Parser *separator, SPC_Fold fold);
+SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Fold fold);
+SPC_Parser *spc_many(SPC_Parser *item, SPC_Fold fold);
+SPC_Parser *spc_many1(SPC_Parser *item, SPC_Fold fold);
 
 static SPC_Result spc_success(void *data, SPC_FreeFn ff) {
 	return (SPC_Result){true, NULL, data, NULL, ff};
@@ -358,7 +346,7 @@ SPC_Parser *spc_lazy(SPC_Parser **ref) {
 typedef struct {
 	SPC_Parser *operand;
 	SPC_Parser *operator;
-	SPC_Fold3 fold;
+	SPC_Fold fold;
 } SPC_ChainLeftCtx;
 
 SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
@@ -389,7 +377,8 @@ SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
 			return right;
 		}
 
-		left.data = ctx->fold.fold(left.data, middle.data, right.data);
+		void *arr[] = {left.data, middle.data, right.data};
+		left.data = ctx->fold.fold(3, arr);
 		left.free_data = ctx->fold.destroy;
 
 		input->unmark(input->self);
@@ -398,7 +387,7 @@ SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
 	return left;
 }
 
-SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold) {
+SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold fold) {
 	SPC_ChainLeftCtx *ctx = malloc(sizeof(*ctx));
 	ctx->operand = operand;
 	ctx->operator = operator;
@@ -413,7 +402,7 @@ SPC_Parser *spc_chain_left(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 
 typedef struct {
 	SPC_Parser *operand;
 	SPC_Parser *operator;
-	SPC_Fold3 fold;
+	SPC_Fold fold;
 } SPC_ChainRightCtx;
 
 SPC_Result spc_parse_chain_right(SPC_Parser *self, SPC_Input *input) {
@@ -446,13 +435,14 @@ SPC_Result spc_parse_chain_right(SPC_Parser *self, SPC_Input *input) {
 
 	input->unmark(input->self);
 
+	void *arr[] = {left.data, middle.data, right.data};
 	return spc_success(
-		ctx->fold.fold(left.data, middle.data, right.data),
+		ctx->fold.fold(3, arr),
 		ctx->fold.destroy
 	);
 }
 
-SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3 fold) {
+SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold fold) {
 	SPC_ChainRightCtx *ctx = malloc(sizeof(*ctx));
 	ctx->operand = operand;
 	ctx->operator = operator;
@@ -465,11 +455,31 @@ SPC_Parser *spc_chain_right(SPC_Parser *operand, SPC_Parser *operator, SPC_Fold3
 }
 
 typedef struct {
+	void **items;
+	size_t count;
+	size_t capacity;
+} SPC_DynArr;
+
+void spc_dynarr_append(SPC_DynArr *da, void *item) {
+	if (da->capacity == 0) da->capacity = 128;
+	if (da->count >= da->capacity - 1 || !da->items)
+		da->items = realloc(da->items, sizeof(void*) * (da->capacity *= 2));
+	da->items[da->count++] = item;
+}
+
+typedef struct {
 	SPC_Parser *item;
 	SPC_Parser *separator;
-	SPC_Container container;
+	SPC_Fold fold;
 	bool at_least_one;
 } SPC_SepByCtx;
+
+void spc_dynarr_free(SPC_DynArr *da) {
+	if (da->items) {
+		free(da->items);
+		da->items = NULL;
+	}
+}
 
 SPC_Result spc_parse_sep_by(SPC_Parser *self, SPC_Input *input) {
 	SPC_SepByCtx *ctx = self->ctx;
@@ -482,18 +492,18 @@ SPC_Result spc_parse_sep_by(SPC_Parser *self, SPC_Input *input) {
 
 		if (ctx->at_least_one) {
 			return first;
-		} else {
-			return spc_success(
-				ctx->container.init(),
-				ctx->container.destroy
-			);
 		}
-	} else {
-		input->unmark(input->self);
+
+		return spc_success(
+			ctx->fold.fold(0, NULL),
+			ctx->fold.destroy
+		);
 	}
 
-	void *cont = ctx->container.init();
-	ctx->container.append(cont, first.data);
+	input->unmark(input->self);
+
+	SPC_DynArr arr = {0};
+	spc_dynarr_append(&arr, first.data);
 
 	while (true) {
 		input->mark(input->self);
@@ -504,22 +514,29 @@ SPC_Result spc_parse_sep_by(SPC_Parser *self, SPC_Input *input) {
 		SPC_Result next = ctx->item->parse(ctx->item, input);
 		if (!next.success) break;
 
-		ctx->container.append(cont, next.data);
+		spc_dynarr_append(&arr, next.data);
 
 		input->unmark(input->self);
 	}
 
 	input->rewind(input->self);
 
-	return spc_success(cont, ctx->container.destroy);
+	SPC_Result res = spc_success(
+		ctx->fold.fold(arr.count, arr.items),
+		ctx->fold.destroy
+	);
+
+	spc_dynarr_free(&arr);
+
+	return res;
 }
 
-SPC_Parser *spc_sep_by(SPC_Parser *item, SPC_Parser *separator, SPC_Container cont) {
+SPC_Parser *spc_sep_by(SPC_Parser *item, SPC_Parser *separator, SPC_Fold fold) {
 	SPC_SepByCtx *ctx = malloc(sizeof(*ctx));
 	ctx->item = item;
 	ctx->separator = separator;
-	ctx->container = cont;
 	ctx->at_least_one = false;
+	ctx->fold = fold;
 
 	SPC_Parser *p = malloc(sizeof(*p));
 	p->parse = spc_parse_sep_by;
@@ -527,12 +544,12 @@ SPC_Parser *spc_sep_by(SPC_Parser *item, SPC_Parser *separator, SPC_Container co
 	return p;
 }
 
-SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Container cont) {
+SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Fold fold) {
 	SPC_SepByCtx *ctx = malloc(sizeof(*ctx));
 	ctx->item = item;
 	ctx->separator = separator;
-	ctx->container = cont;
 	ctx->at_least_one = false;
+	ctx->fold = fold;
 
 	SPC_Parser *p = malloc(sizeof(*p));
 	p->parse = spc_parse_sep_by;
@@ -542,7 +559,7 @@ SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Container c
 
 typedef struct {
 	SPC_Parser *item;
-	SPC_Container container;
+	SPC_Fold fold;
 	bool at_least_one;
 } SPC_ManyCtx;
 
@@ -557,18 +574,18 @@ SPC_Result spc_parse_many(SPC_Parser *self, SPC_Input *input) {
 
 		if (ctx->at_least_one) {
 			return first;
-		} else {
-			return spc_success(
-				ctx->container.init(),
-				ctx->container.destroy
-			);
 		}
-	} else {
-		input->unmark(input->self);
+
+		return spc_success(
+			ctx->fold.fold(0, NULL),
+			ctx->fold.destroy
+		);
 	}
 
-	void *cont = ctx->container.init();
-	ctx->container.append(cont, first.data);
+	input->unmark(input->self);
+
+	SPC_DynArr arr = {0};
+	spc_dynarr_append(&arr, first.data);
 
 	while (true) {
 		input->mark(input->self);
@@ -576,20 +593,27 @@ SPC_Result spc_parse_many(SPC_Parser *self, SPC_Input *input) {
 		SPC_Result item = ctx->item->parse(ctx->item, input);
 		if (!item.success) break;
 
-		ctx->container.append(cont, item.data);
+		spc_dynarr_append(&arr, item.data);
 
 		input->unmark(input->self);
 	}
 
 	input->rewind(input->self);
 
-	return spc_success(cont, ctx->container.destroy);
+	SPC_Result res = spc_success(
+		ctx->fold.fold(arr.count, arr.items),
+		ctx->fold.destroy
+	);
+
+	spc_dynarr_free(&arr);
+
+	return res;
 }
 
-SPC_Parser *spc_many(SPC_Parser *item, SPC_Container cont) {
+SPC_Parser *spc_many(SPC_Parser *item, SPC_Fold fold) {
 	SPC_ManyCtx *ctx = malloc(sizeof(*ctx));
 	ctx->item = item;
-	ctx->container = cont;
+	ctx->fold = fold;
 	ctx->at_least_one = false;
 
 	SPC_Parser *p = malloc(sizeof(*p));
@@ -598,10 +622,10 @@ SPC_Parser *spc_many(SPC_Parser *item, SPC_Container cont) {
 	return p;
 }
 
-SPC_Parser *spc_many1(SPC_Parser *item, SPC_Container cont) {
+SPC_Parser *spc_many1(SPC_Parser *item, SPC_Fold fold) {
 	SPC_ManyCtx *ctx = malloc(sizeof(*ctx));
 	ctx->item = item;
-	ctx->container = cont;
+	ctx->fold = fold;
 	ctx->at_least_one = true;
 
 	SPC_Parser *p = malloc(sizeof(*p));
