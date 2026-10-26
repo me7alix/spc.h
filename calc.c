@@ -144,11 +144,13 @@ SPC_Result pnumf(SPC_Parser *p, SPC_Input *inp) {
 			goto error;
 
 		double num = z * atof(digits);
-		return spc_success(number(num), free);
+		return spc_ok(number(num), free);
+	} else {
+		return spc_fail("not a number", NULL);
 	}
 
 error:
-	return spc_error("incorrect number", NULL);
+	return spc_fatal("incorrect number", NULL);
 }
 
 SPC_Parser *pnum() {
@@ -173,15 +175,15 @@ typedef struct {
 SPC_Result pchf(SPC_Parser *p, SPC_Input *inp) {
 	ParseCharCtx *ctx = p->ctx;
 	Scanner *l = inp->self;
-
 	skip_ws(l);
 
 	if (ctx->character == peek(l)) {
 		next(l);
-		return spc_success((void*)ctx->character, NULL);
+		void *data = (void*)ctx->character;
+		return spc_ok(data, NULL);
 	}
 
-	return spc_error("wrong character", NULL);
+	return spc_fail("wrong character", NULL);
 }
 
 
@@ -228,16 +230,16 @@ int main(int argc, char *argv[]) {
 
 	SPC_Result res = expr->parse(expr, &inp);
 
-	if (peek(&sm) != '\0') {
-		res = spc_error("invalid expression", NULL);
+	if (res.status == SPC_OK && peek(&sm) != '\0') {
+		res = spc_fatal("invalid expression", NULL);
 	}
 
-	if (res.success) {
+	if (res.status == SPC_OK) {
 		double calc = ast_calc(res.data);
 		ast_dump(res.data);
 		printf(" = %g\n", calc);
 	} else {
-		printf("%s\n", res.error);
+		printf("%s\n", res.data);
 	}
 
 	return 0;

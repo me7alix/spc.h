@@ -3,15 +3,20 @@
 
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdbool.h>
 
 typedef void (*SPC_FreeFn)(void*);
 
+typedef enum {
+	SPC_OK,
+	SPC_FAIL,
+	SPC_FATAL
+} SPC_Status;
+
 typedef struct {
-	bool success;
-	void *error;
+	SPC_Status status;
 	void *data;
-	SPC_FreeFn free_error;
-	SPC_FreeFn free_data;
+	SPC_FreeFn destroy;
 } SPC_Result;
 
 typedef struct {
@@ -37,8 +42,8 @@ typedef struct {
 } SPC_Map;
 
 struct SPC_Parser {
-    SPC_ParseFn parse;
-    void *ctx;
+	SPC_ParseFn parse;
+	void *ctx;
 };
 
 SPC_Parser *spc_map(SPC_Parser *parser, SPC_Map transform);
@@ -55,17 +60,24 @@ SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Fold fold);
 SPC_Parser *spc_many(SPC_Parser *item, SPC_Fold fold);
 SPC_Parser *spc_many1(SPC_Parser *item, SPC_Fold fold);
 
-static SPC_Result spc_success(void *data, SPC_FreeFn ff) {
-	return (SPC_Result){true, NULL, data, NULL, ff};
+static SPC_Result spc_ok(void *data, SPC_FreeFn ff) {
+	return (SPC_Result){SPC_OK, data, ff};
 }
 
-static SPC_Result spc_error(void *error, SPC_FreeFn ff) {
-	return (SPC_Result){false, error, NULL, ff, NULL};
+static SPC_Result spc_fail(void *error, SPC_FreeFn ff) {
+	return (SPC_Result){SPC_FAIL, error, ff};
+}
+
+static SPC_Result spc_fatal(void *error, SPC_FreeFn ff) {
+	return (SPC_Result){SPC_FATAL, error, ff};
 }
 
 #endif // SPC_H_
 
 #ifdef SPC_IMPLEMENTATION
+
+#define SPC_FREE_DATA(res) \
+	do { if ((res).destroy) (res).destroy((res).data); } while (0)
 
 typedef struct {
 	SPC_Parser *parser;
@@ -78,14 +90,14 @@ SPC_Result spc_parse_map(SPC_Parser *self, SPC_Input *input) {
 	input->mark(input->self);
 
 	SPC_Result res = ctx->parser->parse(ctx->parser, input);
-	if (!res.success) {
+	if (res.status != SPC_OK) {
 		input->rewind(input->self);
 		return res;
 	}
 
 	input->unmark(input->self);
 
-	return spc_success(
+	return spc_ok(
 		ctx->transform.transform(res.data),
 		ctx->transform.destroy
 	);
@@ -108,22 +120,26 @@ typedef struct {
 } SPC_ChoiceCtx;
 
 SPC_Result spc_parse_choice(SPC_Parser *self, SPC_Input *input) {
-    SPC_ChoiceCtx *ctx = self->ctx;
-	SPC_Result res;
+	SPC_ChoiceCtx *ctx = self->ctx;
+	SPC_Result res = {0};
 
 	for (int i = 0; i < ctx->count; i++) {
 		input->mark(input->self);
 
 		res = ctx->items[i]->parse(ctx->items[i], input);
-		if (res.success) {
+		if (res.status == SPC_OK) {
 			input->unmark(input->self);
 			return res;
 		}
 
 		input->rewind(input->self);
 
-		if (res.free_error) {
-			res.free_error(res.error);
+		if (res.status == SPC_FATAL) {
+			return res;
+		}
+
+		if (i < ctx->count - 1) {
+			SPC_FREE_DATA(res);
 		}
 	}
 
@@ -131,30 +147,30 @@ SPC_Result spc_parse_choice(SPC_Parser *self, SPC_Input *input) {
 }
 
 SPC_Parser *spc_choice(int n, ...) {
-    SPC_ChoiceCtx *ctx = malloc(sizeof(*ctx));
+	SPC_ChoiceCtx *ctx = malloc(sizeof(*ctx));
 	ctx->items = malloc(sizeof(void*) * n);
 	ctx->count = n;
 
 	va_list ap;
-    va_start(ap, n);
-    for (int i = 0; i < n; i++)
-        ctx->items[i] = va_arg(ap, SPC_Parser*);
-    va_end(ap);
+	va_start(ap, n);
+	for (int i = 0; i < n; i++)
+		ctx->items[i] = va_arg(ap, SPC_Parser*);
+	va_end(ap);
 
-    SPC_Parser *p = malloc(sizeof(*p));
-    p->parse = spc_parse_choice;
-    p->ctx = ctx;
-    return p;
+	SPC_Parser *p = malloc(sizeof(*p));
+	p->parse = spc_parse_choice;
+	p->ctx = ctx;
+	return p;
 }
 
 typedef struct {
-    SPC_Parser **items;
+	SPC_Parser **items;
 	int count;
 	SPC_Fold fold;
 } SPC_SequenceCtx;
 
 SPC_Result spc_parse_sequence(SPC_Parser *self, SPC_Input *input) {
-    SPC_SequenceCtx *ctx = self->ctx;
+	SPC_SequenceCtx *ctx = self->ctx;
 	void *items[ctx->count];
 	SPC_FreeFn ffs[ctx->count];
 
@@ -162,165 +178,182 @@ SPC_Result spc_parse_sequence(SPC_Parser *self, SPC_Input *input) {
 
 	for (int i = 0; i < ctx->count; i++) {
 		SPC_Result res = ctx->items[i]->parse(ctx->items[i], input);
-		if (!res.success) {
+		if (res.status != SPC_OK) {
 			for (int j = 0; j < i; j++) {
-				ffs[j](items[j]);
+				if (ffs[j]) ffs[j](items[j]);
 			}
 
 			input->rewind(input->self);
+
+			if (i > 0) {
+				res.status = SPC_FATAL;
+			}
+
 			return res;
 		}
 
 		items[i] = res.data;
-		ffs[i] = res.free_data;
+		ffs[i] = res.destroy;
 	}
 
 	input->unmark(input->self);
 
-    return spc_success(
+	return spc_ok(
 		ctx->fold.fold(ctx->count, items),
 		ctx->fold.destroy
 	);
 }
 
 SPC_Parser *spc_sequence(int n, SPC_Fold fold, ...) {
-    SPC_SequenceCtx *ctx = malloc(sizeof(*ctx));
+	SPC_SequenceCtx *ctx = malloc(sizeof(*ctx));
 	ctx->fold = fold;
 	ctx->items = malloc(sizeof(void*) * n);
 	ctx->count = n;
 
 	va_list ap;
-    va_start(ap, fold);
-    for (int i = 0; i < n; i++)
-        ctx->items[i] = va_arg(ap, SPC_Parser*);
-    va_end(ap);
+	va_start(ap, fold);
+	for (int i = 0; i < n; i++)
+		ctx->items[i] = va_arg(ap, SPC_Parser*);
+	va_end(ap);
 
-    SPC_Parser *p = malloc(sizeof(*p));
-    p->parse = spc_parse_sequence;
-    p->ctx = ctx;
-    return p;
+	SPC_Parser *p = malloc(sizeof(*p));
+	p->parse = spc_parse_sequence;
+	p->ctx = ctx;
+	return p;
 }
 
 typedef struct {
-    SPC_Parser *left;
-    SPC_Parser *right;
+	SPC_Parser *left;
+	SPC_Parser *right;
 } SPC_KeepRightCtx;
 
 SPC_Result parse_keep_right(SPC_Parser *self, SPC_Input *input) {
-    SPC_KeepRightCtx *ctx = self->ctx;
+	SPC_KeepRightCtx *ctx = self->ctx;
 
 	input->mark(input->self);
 
-    SPC_Result left = ctx->left->parse(ctx->left, input);
-    if (!left.success) {
+	SPC_Result left = ctx->left->parse(ctx->left, input);
+	if (left.status != SPC_OK) {
 		input->rewind(input->self);
 		return left;
 	}
 
+	SPC_FREE_DATA(left);
+
 	SPC_Result right = ctx->right->parse(ctx->right, input);
-    if (!right.success) {
+	if (right.status != SPC_OK) {
 		input->rewind(input->self);
+		right.status = SPC_FATAL;
 		return right;
 	}
 
 	input->unmark(input->self);
 
-    return spc_success(right.data, right.free_data);
+	return spc_ok(right.data, right.destroy);
 }
 
 SPC_Parser *spc_keep_right(SPC_Parser *left, SPC_Parser *right) {
-    SPC_KeepRightCtx *ctx = malloc(sizeof(*ctx));
-    ctx->left = left;
-    ctx->right = right;
+	SPC_KeepRightCtx *ctx = malloc(sizeof(*ctx));
+	ctx->left = left;
+	ctx->right = right;
 
-    SPC_Parser *p = malloc(sizeof(*p));
-    p->parse = parse_keep_right;
-    p->ctx = ctx;
-    return p;
+	SPC_Parser *p = malloc(sizeof(*p));
+	p->parse = parse_keep_right;
+	p->ctx = ctx;
+	return p;
 }
 
 typedef struct {
-    SPC_Parser *left;
-    SPC_Parser *right;
+	SPC_Parser *left;
+	SPC_Parser *right;
 } KeepLeftCtx;
 
 SPC_Result spc_parse_keep_left(SPC_Parser *self, SPC_Input *input) {
-    KeepLeftCtx *ctx = self->ctx;
+	KeepLeftCtx *ctx = self->ctx;
 
 	input->mark(input->self);
 
-    SPC_Result left = ctx->left->parse(ctx->left, input);
-    if (!left.success) {
+	SPC_Result left = ctx->left->parse(ctx->left, input);
+	if (left.status != SPC_OK) {
 		input->rewind(input->self);
 		return left;
 	}
 
 	SPC_Result right = ctx->right->parse(ctx->right, input);
-    if (!right.success) {
+	if (right.status != SPC_OK) {
+		SPC_FREE_DATA(left);
 		input->rewind(input->self);
+		right.status = SPC_FATAL;
 		return right;
 	}
 
+	SPC_FREE_DATA(right);
 	input->unmark(input->self);
 
-    return spc_success(left.data, left.free_data);
+	return spc_ok(left.data, left.destroy);
 }
 
 SPC_Parser *spc_keep_left(SPC_Parser *left, SPC_Parser *right) {
-    KeepLeftCtx *ctx = malloc(sizeof(*ctx));
-    ctx->left = left;
-    ctx->right = right;
+	KeepLeftCtx *ctx = malloc(sizeof(*ctx));
+	ctx->left = left;
+	ctx->right = right;
 
-    SPC_Parser *p = malloc(sizeof(*p));
-    p->parse = spc_parse_keep_left;
-    p->ctx = ctx;
-    return p;
+	SPC_Parser *p = malloc(sizeof(*p));
+	p->parse = spc_parse_keep_left;
+	p->ctx = ctx;
+	return p;
 }
 
 typedef struct {
-    SPC_Parser *left;
-    SPC_Parser *middle;
-    SPC_Parser *right;
+	SPC_Parser *left;
+	SPC_Parser *middle;
+	SPC_Parser *right;
 } SPC_BetweenCtx;
 
 SPC_Result spc_parse_between(SPC_Parser *self, SPC_Input *input) {
-    SPC_BetweenCtx *ctx = self->ctx;
+	SPC_BetweenCtx *ctx = self->ctx;
 
 	input->mark(input->self);
 
-    SPC_Result left = ctx->left->parse(ctx->left, input);
-    if (!left.success) {
+	SPC_Result left = ctx->left->parse(ctx->left, input);
+	if (left.status != SPC_OK) {
 		input->rewind(input->self);
 		return left;
 	}
 
+	SPC_FREE_DATA(left);
+
 	SPC_Result middle = ctx->middle->parse(ctx->middle, input);
-    if (!middle.success) {
+	if (middle.status != SPC_OK) {
 		input->rewind(input->self);
+		middle.status = SPC_FATAL;
 		return middle;
 	}
 
 	SPC_Result right = ctx->right->parse(ctx->right, input);
-    if (!right.success) {
+	if (right.status != SPC_OK) {
+		SPC_FREE_DATA(middle);
 		input->rewind(input->self);
+		right.status = SPC_FATAL;
 		return right;
 	}
 
+	SPC_FREE_DATA(right);
 	input->unmark(input->self);
 
-    return spc_success(middle.data, middle.free_data);
+	return spc_ok(middle.data, middle.destroy);
 }
 
 SPC_Parser *spc_between(SPC_Parser *left, SPC_Parser *middle, SPC_Parser *right) {
-    SPC_BetweenCtx *ctx = malloc(sizeof(*ctx));
-    ctx->left = left;
-    ctx->middle = middle;
-    ctx->right = right;
+	SPC_BetweenCtx *ctx = malloc(sizeof(*ctx));
+	ctx->left = left;
+	ctx->middle = middle;
+	ctx->right = right;
 
-    SPC_Parser *p = malloc(sizeof(*p));
-    p->parse = spc_parse_between;
-    p->ctx = ctx;
-    return p;
+	SPC_Parser *p = malloc(sizeof(*p));
+	p->parse = spc_parse_between;
+	p->ctx = ctx;
+	return p;
 }
 
 typedef struct {
@@ -355,7 +388,7 @@ SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
 	input->mark(input->self);
 
 	SPC_Result left = ctx->operand->parse(ctx->operand, input);
-	if (!left.success) {
+	if (left.status != SPC_OK) {
 		input->rewind(input->self);
 		return left;
 	}
@@ -366,20 +399,28 @@ SPC_Result spc_parse_chain_left(SPC_Parser *self, SPC_Input *input) {
 		input->mark(input->self);
 
 		SPC_Result middle = ctx->operator->parse(ctx->operator, input);
-		if (!middle.success) {
+		if (middle.status == SPC_FAIL) {
+			SPC_FREE_DATA(middle);
 			input->rewind(input->self);
 			break;
+		} else if (middle.status == SPC_FATAL) {
+			SPC_FREE_DATA(left);
+			input->rewind(input->self);
+			return middle;
 		}
 
 		SPC_Result right = ctx->operand->parse(ctx->operand, input);
-		if (!right.success) {
+		if (right.status != SPC_OK) {
+			SPC_FREE_DATA(left);
+			SPC_FREE_DATA(middle);
 			input->rewind(input->self);
+			right.status = SPC_FATAL;
 			return right;
 		}
 
 		void *arr[] = {left.data, middle.data, right.data};
 		left.data = ctx->fold.fold(3, arr);
-		left.free_data = ctx->fold.destroy;
+		left.destroy = ctx->fold.destroy;
 
 		input->unmark(input->self);
 	}
@@ -411,7 +452,7 @@ SPC_Result spc_parse_chain_right(SPC_Parser *self, SPC_Input *input) {
 	input->mark(input->self);
 
 	SPC_Result left = ctx->operand->parse(ctx->operand, input);
-	if (!left.success) {
+	if (left.status != SPC_OK) {
 		input->rewind(input->self);
 		return left;
 	}
@@ -421,22 +462,30 @@ SPC_Result spc_parse_chain_right(SPC_Parser *self, SPC_Input *input) {
 	input->mark(input->self);
 
 	SPC_Result middle = ctx->operator->parse(ctx->operator, input);
-	if (!middle.success) {
+	if (middle.status == SPC_FAIL) {
+		SPC_FREE_DATA(middle);
 		input->rewind(input->self);
 		return left;
+	} else if (middle.status == SPC_FATAL) {
+		SPC_FREE_DATA(left);
+		input->rewind(input->self);
+		return middle;
 	}
 
 	SPC_Parser req_parser = {spc_parse_chain_right, ctx};
 	SPC_Result right = req_parser.parse(&req_parser, input);
-	if (!right.success) {
+	if (right.status != SPC_OK) {
+		SPC_FREE_DATA(left);
+		SPC_FREE_DATA(middle);
 		input->rewind(input->self);
+		right.status = SPC_FATAL;
 		return right;
 	}
 
 	input->unmark(input->self);
 
 	void *arr[] = {left.data, middle.data, right.data};
-	return spc_success(
+	return spc_ok(
 		ctx->fold.fold(3, arr),
 		ctx->fold.destroy
 	);
@@ -481,20 +530,32 @@ void spc_dynarr_free(SPC_DynArr *da) {
 	}
 }
 
+void spc_free_all(SPC_DynArr *arr, SPC_DynArr *ffs) {
+	for (size_t i = 0; i < arr->count; i++) {
+		SPC_FreeFn fn = (SPC_FreeFn)ffs->items[i];
+		if (fn) fn(arr->items[i]);
+	}
+
+	spc_dynarr_free(arr);
+	spc_dynarr_free(ffs);
+}
+
 SPC_Result spc_parse_sep_by(SPC_Parser *self, SPC_Input *input) {
 	SPC_SepByCtx *ctx = self->ctx;
 
 	input->mark(input->self);
 
 	SPC_Result first = ctx->item->parse(ctx->item, input);
-	if (!first.success) {
+	if (first.status != SPC_OK) {
 		input->rewind(input->self);
 
-		if (ctx->at_least_one) {
+		if (ctx->at_least_one || first.status == SPC_FATAL) {
 			return first;
 		}
 
-		return spc_success(
+		SPC_FREE_DATA(first);
+
+		return spc_ok(
 			ctx->fold.fold(0, NULL),
 			ctx->fold.destroy
 		);
@@ -503,30 +564,49 @@ SPC_Result spc_parse_sep_by(SPC_Parser *self, SPC_Input *input) {
 	input->unmark(input->self);
 
 	SPC_DynArr arr = {0};
+	SPC_DynArr ffs = {0};
+
 	spc_dynarr_append(&arr, first.data);
+	spc_dynarr_append(&ffs, (void*)first.destroy);
 
 	while (true) {
 		input->mark(input->self);
 
 		SPC_Result sep = ctx->separator->parse(ctx->separator, input);
-		if (!sep.success) break;
+		if (sep.status == SPC_FAIL) {
+			SPC_FREE_DATA(sep);
+			break;
+		} else if (sep.status == SPC_FATAL) {
+			input->rewind(input->self);
+			spc_free_all(&arr, &ffs);
+			return sep;
+		}
+
+		SPC_FREE_DATA(sep);
 
 		SPC_Result next = ctx->item->parse(ctx->item, input);
-		if (!next.success) break;
+		if (next.status != SPC_OK) {
+			input->rewind(input->self);
+			spc_free_all(&arr, &ffs);
+			next.status = SPC_FATAL;
+			return next;
+		}
 
 		spc_dynarr_append(&arr, next.data);
+		spc_dynarr_append(&ffs, (void*)next.destroy);
 
 		input->unmark(input->self);
 	}
 
 	input->rewind(input->self);
 
-	SPC_Result res = spc_success(
+	SPC_Result res = spc_ok(
 		ctx->fold.fold(arr.count, arr.items),
 		ctx->fold.destroy
 	);
 
 	spc_dynarr_free(&arr);
+	spc_dynarr_free(&ffs);
 
 	return res;
 }
@@ -548,7 +628,7 @@ SPC_Parser *spc_sep_by1(SPC_Parser *item, SPC_Parser *separator, SPC_Fold fold) 
 	SPC_SepByCtx *ctx = malloc(sizeof(*ctx));
 	ctx->item = item;
 	ctx->separator = separator;
-	ctx->at_least_one = false;
+	ctx->at_least_one = true;
 	ctx->fold = fold;
 
 	SPC_Parser *p = malloc(sizeof(*p));
@@ -569,14 +649,16 @@ SPC_Result spc_parse_many(SPC_Parser *self, SPC_Input *input) {
 	input->mark(input->self);
 
 	SPC_Result first = ctx->item->parse(ctx->item, input);
-	if (!first.success) {
+	if (first.status != SPC_OK) {
 		input->rewind(input->self);
 
-		if (ctx->at_least_one) {
+		if (ctx->at_least_one || first.status == SPC_FATAL) {
 			return first;
 		}
 
-		return spc_success(
+		SPC_FREE_DATA(first);
+
+		return spc_ok(
 			ctx->fold.fold(0, NULL),
 			ctx->fold.destroy
 		);
@@ -585,27 +667,38 @@ SPC_Result spc_parse_many(SPC_Parser *self, SPC_Input *input) {
 	input->unmark(input->self);
 
 	SPC_DynArr arr = {0};
+	SPC_DynArr ffs = {0};
 	spc_dynarr_append(&arr, first.data);
+	spc_dynarr_append(&ffs, (void*)first.destroy);
 
 	while (true) {
 		input->mark(input->self);
 
 		SPC_Result item = ctx->item->parse(ctx->item, input);
-		if (!item.success) break;
+		if (item.status == SPC_FAIL) {
+			SPC_FREE_DATA(item);
+			break;
+		} else if (item.status == SPC_FATAL) {
+			input->rewind(input->self);
+			spc_free_all(&arr, &ffs);
+			return item;
+		}
 
 		spc_dynarr_append(&arr, item.data);
+		spc_dynarr_append(&ffs, (void*)item.destroy);
 
 		input->unmark(input->self);
 	}
 
 	input->rewind(input->self);
 
-	SPC_Result res = spc_success(
+	SPC_Result res = spc_ok(
 		ctx->fold.fold(arr.count, arr.items),
 		ctx->fold.destroy
 	);
 
 	spc_dynarr_free(&arr);
+	spc_dynarr_free(&ffs);
 
 	return res;
 }
